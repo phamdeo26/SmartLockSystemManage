@@ -8,6 +8,7 @@ import javax.servlet.http.HttpSession;
  *
  * @author acer
  */
+
 public final class Flash {
 
     private Flash() {
@@ -21,3 +22,4 @@ public final class Flash {
         session.setAttribute("flashError", message);
     }
 }
+
