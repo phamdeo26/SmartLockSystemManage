@@ -78,7 +78,6 @@ public class IoTController extends BaseController {
                 resp.getWriter().println("OK");
             } else {
                 recordFailure(lockId);
-                // The device gets the same answer for every refusal, so it learns nothing about why.
                 resp.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 resp.getWriter().println("DENIED");
             }

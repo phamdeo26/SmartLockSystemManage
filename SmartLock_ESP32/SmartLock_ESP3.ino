@@ -81,6 +81,18 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 // and switch COM/NO connects GPIO35 to GND when pressed.
 #define LIMIT_SWITCH_PIN 35
 
+// Inside exit button on GPIO34.
+// GPIO34 has NO internal pull-up: install an external 10k resistor
+// from GPIO34 to 3.3V, and connect the button between GPIO34 and GND.
+// Released = HIGH; pressed = LOW.
+#define EXIT_BUTTON_PIN 34
+const unsigned long EXIT_BUTTON_DEBOUNCE_MS = 40;
+bool exitButtonRawLast = HIGH;
+bool exitButtonStable = HIGH;
+bool exitButtonArmed = false;
+unsigned long exitButtonLastChange = 0;
+unsigned long exitButtonDebugTime = 0;
+
 // Set true if the relay is triggered by LOW.
 // If your relay's H/L jumper is set to HIGH trigger, change to false.
 const bool RELAY_ACTIVE_LOW = false;
@@ -125,6 +137,7 @@ bool doorIsClosed() {
 
 void startUnlockSession(const char* method);
 void updateLockAndDoorState();
+void checkExitButton();
 
 // ==================================================
 // 6. KEYPAD 4x4
@@ -142,7 +155,7 @@ char keys[ROWS][COLS] = {
 
 byte rowPins[ROWS] = {32, 33, 25, 26};
 // NOTE: GPIO0 is a boot-strapping pin. Keep the keypad key on this line released while resetting/uploading.
-byte colPins[COLS] = {14, 15, 12, 27}; // C2 moved from GPIO0 to GPIO15; GPIO15 is a boot-strapping pin
+byte colPins[COLS] = {14, 27, 12, 15}; // C2 moved from GPIO0 to GPIO15; GPIO15 is a boot-strapping pin
 
 Keypad keypad = Keypad(
   makeKeymap(keys),
@@ -349,6 +362,52 @@ void startUnlockSession(const char* method) {
   reportLockState("UNLOCKED");
 }
 
+void checkExitButton() {
+  // GPIO34 is input-only and requires an external 10k pull-up to 3.3V.
+  const bool raw = digitalRead(EXIT_BUTTON_PIN);
+  const unsigned long now = millis();
+
+  if (raw != exitButtonRawLast) {
+    exitButtonRawLast = raw;
+    exitButtonLastChange = now;
+    Serial.print("[EXIT] GPIO34 edge: ");
+    Serial.println(raw == LOW ? "LOW (pressed)" : "HIGH (released)");
+  }
+
+  if (now - exitButtonLastChange >= EXIT_BUTTON_DEBOUNCE_MS &&
+      raw != exitButtonStable) {
+    exitButtonStable = raw;
+
+    if (exitButtonStable == HIGH) {
+      exitButtonArmed = true;
+      Serial.println("[EXIT] Button released; armed for next press.");
+    } else {
+      Serial.println("[EXIT] Stable LOW detected.");
+      if (!exitButtonArmed) {
+        Serial.println("[EXIT] Ignored LOW until HIGH/released is seen.");
+      } else {
+        exitButtonArmed = false;
+        Serial.println("[EXIT] BUTTON PRESSED - requesting unlock.");
+        if (!unlockSessionActive) {
+          startUnlockSession("EXIT BUTTON");
+        } else {
+          Serial.println("[EXIT] Unlock session already active; request ignored.");
+        }
+      }
+    }
+  }
+
+  if (now - exitButtonDebugTime >= 1000) {
+    exitButtonDebugTime = now;
+    Serial.print("[EXIT] GPIO34 raw=");
+    Serial.print(raw == LOW ? "LOW" : "HIGH");
+    Serial.print(", stable=");
+    Serial.print(exitButtonStable == LOW ? "LOW" : "HIGH");
+    Serial.print(", armed=");
+    Serial.println(exitButtonArmed ? "YES" : "NO");
+  }
+}
+
 void updateLockAndDoorState() {
   // Debounce the limit switch.
   bool raw = digitalRead(LIMIT_SWITCH_PIN);
@@ -415,6 +474,7 @@ void deniedAccess(const char* method) {
   lcd.print(method);
 
   enteredPIN = "";
+  delay(1500);  // Keep ACCESS DENIED visible on the LCD
   showReady();
 }
 
@@ -523,10 +583,7 @@ void checkFingerprint() {
     }
   } else if (p == FINGERPRINT_NOTFOUND) {
     Serial.println("[FINGER] Not enrolled on sensor.");
-
-    lcd.clear();
-    lcd.print("Finger Unknown");
-    showReady();
+    deniedAccess("FINGERPRINT");
   } else {
     Serial.print("[FINGER] Search error: ");
     Serial.println(p);
@@ -619,6 +676,21 @@ void setup() {
   pinMode(LOCK_RELAY_PIN, OUTPUT);
   setRelay(false);
 
+  // Exit button on GPIO34: external 10k pull-up to 3.3V is mandatory.
+  // Button connects GPIO34 to GND when pressed. Do not use INPUT_PULLUP here.
+  pinMode(EXIT_BUTTON_PIN, INPUT);
+  exitButtonRawLast = digitalRead(EXIT_BUTTON_PIN);
+  exitButtonStable = exitButtonRawLast;
+  exitButtonArmed = (exitButtonRawLast == HIGH);
+  exitButtonLastChange = millis();
+  exitButtonDebugTime = millis();
+  Serial.println("[EXIT] Button on GPIO34 initialized (external pull-up; pressed=LOW).");
+  Serial.print("[EXIT] Initial GPIO34 level: ");
+  Serial.println(exitButtonRawLast == LOW ? "LOW" : "HIGH");
+  if (!exitButtonArmed) {
+    Serial.println("[EXIT] Startup level LOW; release button before it can trigger.");
+  }
+
   // Limit switch: GPIO35 is input-only and has no internal pull-up.
   // External 10k pull-up to 3.3V is required with the wiring described above.
   pinMode(LIMIT_SWITCH_PIN, INPUT);
@@ -685,6 +757,7 @@ void setup() {
 
 void loop() {
   updateLockAndDoorState();
+  checkExitButton();
 
   if (millis() - lastHeartbeat >= 2000) {
     lastHeartbeat = millis();
