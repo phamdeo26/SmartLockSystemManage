@@ -1,4 +1,3 @@
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <SPI.h>
@@ -8,9 +7,6 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-// ==================================================
-// 1. WIFI & JAVA WEB SERVER
-// ==================================================
 
 const char* WIFI_SSID = "?????";
 const char* WIFI_PASSWORD = "001007006";
@@ -18,12 +14,12 @@ const char* WIFI_PASSWORD = "001007006";
 const char* SERVER_BASE_URL =
   "http://192.168.137.1:8080/SmartLockSystemManagement";
 
-// Must exactly match web.xml context-param deviceApiKey.
+
 const char* API_KEY = "SmartLockESP32Key2026";
 const int LOCK_ID = 1;
 
-// Remote web unlock polling
-const unsigned long POLL_INTERVAL_MS = 5000; // Less frequent blocking HTTP poll
+
+const unsigned long POLL_INTERVAL_MS = 5000;
 unsigned long lastPollTime = 0;
 bool remoteUnlockInProgress = false;
 
@@ -39,18 +35,12 @@ String stateUrl() {
   return String(SERVER_BASE_URL) + "/api/device/state";
 }
 
-// ==================================================
-// 2. RFID RC522
-// ==================================================
 
 #define RFID_SS  5
 #define RFID_RST 13
 
 MFRC522 rfid(RFID_SS, RFID_RST);
 
-// ==================================================
-// 3. FINGERPRINT AS608
-// ==================================================
 
 HardwareSerial fingerSerial(2);
 Adafruit_Fingerprint finger(&fingerSerial);
@@ -63,28 +53,16 @@ bool waitingFingerRemoval = false;
 unsigned long fingerWaitStart = 0;
 unsigned long lastHeartbeat = 0;
 
-// ==================================================
-// 4. LCD 1602 I2C
-// ==================================================
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ==================================================
-// 5. ELECTRIC BOLT LOCK + RELAY + LIMIT SWITCH
-// ==================================================
 
-// Relay input uses GPIO4 (P04), as requested.
 #define LOCK_RELAY_PIN 4
 
-// Limit switch uses GPIO35. GPIO35 has no internal pull-up.
-// Wiring assumption: GPIO35 -- 10k resistor --> 3.3V,
-// and switch COM/NO connects GPIO35 to GND when pressed.
+
 #define LIMIT_SWITCH_PIN 35
 
-// Inside exit button on GPIO34.
-// GPIO34 has NO internal pull-up: install an external 10k resistor
-// from GPIO34 to 3.3V, and connect the button between GPIO34 and GND.
-// Released = HIGH; pressed = LOW.
+
 #define EXIT_BUTTON_PIN 34
 const unsigned long EXIT_BUTTON_DEBOUNCE_MS = 40;
 bool exitButtonRawLast = HIGH;
@@ -97,14 +75,10 @@ unsigned long enrollmentStartedAt = 0;
 const unsigned long ENROLLMENT_TIMEOUT_MS = 60000;
 unsigned long exitButtonLastChange = 0;
 
-// Set true if the relay is triggered by LOW.
-// If your relay's H/L jumper is set to HIGH trigger, change to false.
+
 const bool RELAY_ACTIVE_LOW = false;
 
-// Maximum time to energize the solenoid to avoid overheating.
-// The lock's seller/specification takes priority; do not exceed it.
-// Coil safety cutoff: set according to the lock manufacturer's duty rating.
-// This is NOT the normal auto-lock timer; the door-close switch controls relocking.
+
 const unsigned long MAX_UNLOCK_MS = 8000;
 
 bool unlockSessionActive = false;
@@ -122,9 +96,7 @@ void setRelay(bool energized) {
   digitalWrite(LOCK_RELAY_PIN, energized ? onLevel : offLevel);
 }
 
-// Reinitialize RC522 once after the lock relay is switched OFF.
-// This can recover a reader whose SPI communication was disturbed by the lock.
-// It does not replace fixing electrical noise or power problems.
+
 void recoverRFIDAfterUnlock() {
   Serial.println("[RFID] Reinitializing RC522 after relay OFF...");
   delay(50);
@@ -135,7 +107,7 @@ void recoverRFIDAfterUnlock() {
 }
 
 bool doorIsClosed() {
-  // Assumes the switch is pressed and pulls GPIO35 LOW when door is closed.
+
   return limitStable == LOW;
 }
 
@@ -143,9 +115,6 @@ void startUnlockSession(const char* method);
 void updateLockAndDoorState();
 void checkExitButton();
 
-// ==================================================
-// 6. KEYPAD 4x4
-// ==================================================
 
 const byte ROWS = 4;
 const byte COLS = 4;
@@ -158,8 +127,8 @@ char keys[ROWS][COLS] = {
 };
 
 byte rowPins[ROWS] = {32, 33, 25, 26};
-// NOTE: GPIO0 is a boot-strapping pin. Keep the keypad key on this line released while resetting/uploading.
-byte colPins[COLS] = {14, 27, 12, 15}; // C2 moved from GPIO0 to GPIO15; GPIO15 is a boot-strapping pin
+
+byte colPins[COLS] = {14, 27, 12, 15};
 
 Keypad keypad = Keypad(
   makeKeymap(keys),
@@ -171,9 +140,6 @@ Keypad keypad = Keypad(
 
 String enteredPIN = "";
 
-// ==================================================
-// 7. LCD READY SCREEN
-// ==================================================
 
 void showReady() {
   lcd.clear();
@@ -183,9 +149,6 @@ void showReady() {
   lcd.print("Scan / Enter PIN");
 }
 
-// ==================================================
-// 8. VERIFY CREDENTIAL WITH JAVA WEB
-// ==================================================
 
 bool verifyCredential(const char* type, String value) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -244,15 +207,12 @@ bool verifyCredential(const char* type, String value) {
 
   http.end();
 
-  // Chi chap nhan ket qua thanh cong tu Java Web
+
   return httpCode == 200 && response == "OK";
 }
 
 void reportLockState(const char* state);
 
-// ==================================================
-// 9. REPORT LOCK STATE TO JAVA WEB
-// ==================================================
 
 void reportLockState(const char* state) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -288,9 +248,6 @@ void reportLockState(const char* state) {
   http.end();
 }
 
-// ==================================================
-// 10. CHECK REMOTE UNLOCK COMMAND FROM WEBSITE
-// ==================================================
 
 void checkRemoteUnlock() {
   if (WiFi.status() != WL_CONNECTED || remoteUnlockInProgress) {
@@ -338,9 +295,6 @@ void checkRemoteUnlock() {
   }
 }
 
-// ==================================================
-// UNLOCK SESSION + DOOR/LIMIT SWITCH MONITORING
-// ==================================================
 
 void startUnlockSession(const char* method) {
   if (unlockSessionActive) {
@@ -367,7 +321,7 @@ void startUnlockSession(const char* method) {
 }
 
 void checkExitButton() {
-  // GPIO34 is input-only and requires an external 10k pull-up to 3.3V.
+
   const bool raw = digitalRead(EXIT_BUTTON_PIN);
   const unsigned long now = millis();
 
@@ -381,8 +335,8 @@ void checkExitButton() {
     exitButtonStable = raw;
 
     if (exitButtonStable == LOW) {
-      // Defer the normal exit action until release. This gives the user
-      // time to press A while holding the inside exit button.
+
+
       exitButtonHeld = true;
       enrollmentComboUsed = false;
       exitButtonArmed = false;
@@ -450,14 +404,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // IMPORTANT:
-  // checkFingerprint() already called finger.getImage() and confirmed
-  // FINGERPRINT_OK before entering this function. Do not call getImage()
-  // again here, or the first captured image may be consumed/lost.
 
-  // Find a free template slot BEFORE creating the new model.
-  // loadModel() uses the sensor's character buffer, so doing this after
-  // createModel() could overwrite the newly-created fingerprint template.
   showEnrollmentMessage("Finding free ID", "Please wait...");
   int freeId = -1;
 
@@ -480,7 +427,7 @@ void enrollFingerprint() {
   Serial.print("[ENROLL][FINGER] Selected free ID: ");
   Serial.println(freeId);
 
-  // Convert the first image already captured by checkFingerprint().
+
   showEnrollmentMessage("Place finger", "First scan...");
   uint8_t p = finger.image2Tz(1);
 
@@ -492,7 +439,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // Reject a fingerprint that is already enrolled in the sensor.
+
   p = finger.fingerSearch();
 
   if (p == FINGERPRINT_OK) {
@@ -504,7 +451,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // Wait for the user to remove the finger before the second scan.
+
   showEnrollmentMessage("Remove finger", "Please wait...");
   unsigned long waitStart = millis();
   bool fingerRemoved = false;
@@ -527,7 +474,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // Capture the same finger for the second time.
+
   showEnrollmentMessage("Place same finger", "Second scan...");
   waitStart = millis();
 
@@ -558,7 +505,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // Merge the two scans into one fingerprint model.
+
   p = finger.createModel();
 
   if (p != FINGERPRINT_OK) {
@@ -569,7 +516,7 @@ void enrollFingerprint() {
     return;
   }
 
-  // Store the newly-created model in the free slot selected earlier.
+
   p = finger.storeModel((uint16_t)freeId);
 
   if (p == FINGERPRINT_OK) {
@@ -591,7 +538,7 @@ void enrollFingerprint() {
 }
 
 void updateLockAndDoorState() {
-  // Debounce the limit switch.
+
   bool raw = digitalRead(LIMIT_SWITCH_PIN);
   if (raw != limitRawLast) {
     limitRawLast = raw;
@@ -610,8 +557,7 @@ void updateLockAndDoorState() {
     return;
   }
 
-  // After access is granted, keep the solenoid energized until the door
-  // opens and then closes again, but enforce a hard timeout for coil safety.
+
   if (!doorIsClosed()) {
     doorOpenedDuringSession = true;
   }
@@ -627,9 +573,7 @@ void updateLockAndDoorState() {
     return;
   }
 
-  // Safety cutoff only: never keep a solenoid energized beyond its rated duty time.
-  // Normal relocking happens only after the switch reports:
-  // door opened (switch released) and then door closed (switch pressed).
+
   if (millis() - unlockSessionStart >= MAX_UNLOCK_MS) {
     setRelay(false);
     unlockSessionActive = false;
@@ -641,9 +585,6 @@ void updateLockAndDoorState() {
   }
 }
 
-// ==================================================
-// 10. DENY ACCESS
-// ==================================================
 
 void deniedAccess(const char* method) {
   Serial.print("[ACCESS] DENIED: ");
@@ -656,13 +597,10 @@ void deniedAccess(const char* method) {
   lcd.print(method);
 
   enteredPIN = "";
-  delay(1500);  // Keep DENIED visible briefly
+  delay(1500);
   showReady();
 }
 
-// ==================================================
-// 11. RFID AUTHENTICATION
-// ==================================================
 
 void checkRFID() {
   if (unlockSessionActive) return;
@@ -717,18 +655,12 @@ void checkRFID() {
   }
 }
 
-// ==================================================
-// 12. START WAIT FOR FINGER REMOVAL
-// ==================================================
 
 void startFingerRemovalWait() {
   waitingFingerRemoval = true;
   fingerWaitStart = millis();
 }
 
-// ==================================================
-// 13. FINGERPRINT AUTHENTICATION
-// ==================================================
 
 void checkFingerprint() {
   if (unlockSessionActive) return;
@@ -799,9 +731,6 @@ void checkFingerprint() {
   startFingerRemovalWait();
 }
 
-// ==================================================
-// 14. KEYPAD PIN AUTHENTICATION
-// ==================================================
 
 void checkKeypad() {
   if (unlockSessionActive) return;
@@ -822,25 +751,25 @@ void checkKeypad() {
     return;
   }
 
-  // Hold GPIO34 and press A together to enter enrollment mode.
+
   if (key == 'A' && exitButtonHeld && exitButtonStable == LOW) {
     enrollmentComboUsed = true;
     enterEnrollmentMode();
     return;
   }
 
-  // Ignore A/B/C/D outside enrollment mode.
+
   if (key == 'A' || key == 'B' || key == 'C' || key == 'D') {
     return;
   }
 
-  // Nhap chu so
+
   if (key >= '0' && key <= '9') {
     if (enteredPIN.length() < 8) {
       enteredPIN += key;
     }
 
-    // Update only the PIN row; avoid unnecessary full-row redraws.
+
     lcd.setCursor(0, 0);
     lcd.print("Enter PIN:      ");
     lcd.setCursor(0, 1);
@@ -851,7 +780,7 @@ void checkKeypad() {
     }
   }
 
-  // Xoa PIN
+
   else if (key == '*') {
     enteredPIN = "";
 
@@ -860,7 +789,7 @@ void checkKeypad() {
     showReady();
   }
 
-  // Gui PIN len server
+
   else if (key == '#') {
     String pin = enteredPIN;
     enteredPIN = "";
@@ -881,15 +810,12 @@ void checkKeypad() {
   }
 }
 
-// ==================================================
-// 15. SETUP
-// ==================================================
 
 void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // LCD
+
   Wire.begin(21, 22);
   lcd.init();
   lcd.backlight();
@@ -897,13 +823,12 @@ void setup() {
   lcd.clear();
   lcd.print("Starting Lock...");
 
-  // Relay: set OFF level before configuring output to reduce startup glitches.
+
   digitalWrite(LOCK_RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
   pinMode(LOCK_RELAY_PIN, OUTPUT);
   setRelay(false);
 
-  // Exit button on GPIO34: external 10k pull-up to 3.3V is mandatory.
-  // Button connects GPIO34 to GND when pressed. Do not use INPUT_PULLUP here.
+
   pinMode(EXIT_BUTTON_PIN, INPUT);
   exitButtonRawLast = digitalRead(EXIT_BUTTON_PIN);
   exitButtonStable = exitButtonRawLast;
@@ -916,8 +841,7 @@ void setup() {
     Serial.println("[EXIT] Startup level LOW; release button before it can trigger.");
   }
 
-  // Limit switch: GPIO35 is input-only and has no internal pull-up.
-  // External 10k pull-up to 3.3V is required with the wiring described above.
+
   pinMode(LIMIT_SWITCH_PIN, INPUT);
   limitRawLast = digitalRead(LIMIT_SWITCH_PIN);
   limitStable = limitRawLast;
@@ -925,7 +849,7 @@ void setup() {
   Serial.print("[DOOR] Initial state: ");
   Serial.println(doorIsClosed() ? "CLOSED" : "OPEN/UNPRESSED");
 
-  // RFID SPI
+
   SPI.begin(18, 19, 23, RFID_SS);
   rfid.PCD_Init();
   delay(100);
@@ -933,7 +857,7 @@ void setup() {
   Serial.println("[RFID] RC522 initialized.");
   rfid.PCD_DumpVersionToSerial();
 
-  // AS608
+
   fingerSerial.begin(
     57600,
     SERIAL_8N1,
@@ -949,7 +873,7 @@ void setup() {
     fingerprintReady ? "READY" : "NOT FOUND"
   );
 
-  // WiFi
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -976,9 +900,6 @@ void setup() {
   Serial.println("[SYSTEM] Smart Lock ready.");
 }
 
-// ==================================================
-// 16. MAIN LOOP
-// ==================================================
 
 void loop() {
   updateLockAndDoorState();
@@ -994,7 +915,7 @@ void loop() {
   }
 
   if (!unlockSessionActive) {
-    // Scan local input first so web polling cannot take priority over keypad.
+
     checkKeypad();
     checkRFID();
 
@@ -1008,7 +929,7 @@ void loop() {
 
     checkFingerprint();
 
-    // Do not run remote polling while the user is enrolling credentials.
+
     if (!enrollmentMode) {
       checkRemoteUnlock();
     }
