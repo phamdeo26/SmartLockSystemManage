@@ -90,8 +90,12 @@ const unsigned long EXIT_BUTTON_DEBOUNCE_MS = 40;
 bool exitButtonRawLast = HIGH;
 bool exitButtonStable = HIGH;
 bool exitButtonArmed = false;
+bool exitButtonHeld = false;
+bool enrollmentMode = false;
+bool enrollmentComboUsed = false;
+unsigned long enrollmentStartedAt = 0;
+const unsigned long ENROLLMENT_TIMEOUT_MS = 60000;
 unsigned long exitButtonLastChange = 0;
-unsigned long exitButtonDebugTime = 0;
 
 // Set true if the relay is triggered by LOW.
 // If your relay's H/L jumper is set to HIGH trigger, change to false.
@@ -198,8 +202,8 @@ bool verifyCredential(const char* type, String value) {
   }
 
   HTTPClient http;
-  http.setConnectTimeout(500);
-  http.setTimeout(800);
+  http.setConnectTimeout(3000);
+  http.setTimeout(8000);
 
   if (!http.begin(verifyUrl())) {
     Serial.println("[AUTH] HTTP initialization failed.");
@@ -370,42 +374,220 @@ void checkExitButton() {
   if (raw != exitButtonRawLast) {
     exitButtonRawLast = raw;
     exitButtonLastChange = now;
-    Serial.print("[EXIT] GPIO34 edge: ");
-    Serial.println(raw == LOW ? "LOW (pressed)" : "HIGH (released)");
   }
 
   if (now - exitButtonLastChange >= EXIT_BUTTON_DEBOUNCE_MS &&
       raw != exitButtonStable) {
     exitButtonStable = raw;
 
-    if (exitButtonStable == HIGH) {
-      exitButtonArmed = true;
-      Serial.println("[EXIT] Button released; armed for next press.");
+    if (exitButtonStable == LOW) {
+      // Defer the normal exit action until release. This gives the user
+      // time to press A while holding the inside exit button.
+      exitButtonHeld = true;
+      enrollmentComboUsed = false;
+      exitButtonArmed = false;
+      Serial.println("[EXIT] Button held; press A now for enrollment mode.");
     } else {
-      Serial.println("[EXIT] Stable LOW detected.");
-      if (!exitButtonArmed) {
-        Serial.println("[EXIT] Ignored LOW until HIGH/released is seen.");
-      } else {
-        exitButtonArmed = false;
-        Serial.println("[EXIT] BUTTON PRESSED - requesting unlock.");
-        if (!unlockSessionActive) {
-          startUnlockSession("EXIT BUTTON");
-        } else {
-          Serial.println("[EXIT] Unlock session already active; request ignored.");
+      if (exitButtonHeld) {
+        exitButtonHeld = false;
+        if (!enrollmentComboUsed && !enrollmentMode) {
+          Serial.println("[EXIT] BUTTON PRESSED - requesting unlock.");
+          if (!unlockSessionActive) {
+            startUnlockSession("EXIT BUTTON");
+          } else {
+            Serial.println("[EXIT] Unlock session already active; request ignored.");
+          }
         }
       }
+      exitButtonArmed = true;
+      Serial.println("[EXIT] Button released; armed for next press.");
+    }
+  }
+}
+
+void enterEnrollmentMode() {
+  if (unlockSessionActive) {
+    Serial.println("[ENROLL] Cannot enroll while unlock session is active.");
+    return;
+  }
+
+  enrollmentMode = true;
+  enrollmentStartedAt = millis();
+  enteredPIN = "";
+  waitingFingerRemoval = false;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("ENROLL MODE");
+  lcd.setCursor(0, 1);
+  lcd.print("Scan card/finger");
+
+  Serial.println("========== ENROLLMENT MODE ==========");
+  Serial.println("Scan an RFID card OR enroll a fingerprint.");
+  Serial.println("Press D to exit; auto-exit after 60 seconds.");
+}
+
+void exitEnrollmentMode() {
+  enrollmentMode = false;
+  waitingFingerRemoval = false;
+  Serial.println("[ENROLL] Enrollment mode ended.");
+  showReady();
+}
+
+void showEnrollmentMessage(const char* line1, const String& line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+  lcd.setCursor(0, 1);
+  lcd.print(line2.substring(0, 16));
+}
+
+void enrollFingerprint() {
+  if (!fingerprintReady) {
+    showEnrollmentMessage("AS608 NOT READY", "Check sensor");
+    Serial.println("[ENROLL][FINGER] AS608 not ready.");
+    delay(1200);
+    return;
+  }
+
+  // IMPORTANT:
+  // checkFingerprint() already called finger.getImage() and confirmed
+  // FINGERPRINT_OK before entering this function. Do not call getImage()
+  // again here, or the first captured image may be consumed/lost.
+
+  // Find a free template slot BEFORE creating the new model.
+  // loadModel() uses the sensor's character buffer, so doing this after
+  // createModel() could overwrite the newly-created fingerprint template.
+  showEnrollmentMessage("Finding free ID", "Please wait...");
+  int freeId = -1;
+
+  for (int id = 1; id <= 127; id++) {
+    uint8_t loadStatus = finger.loadModel((uint16_t)id);
+
+    if (loadStatus != FINGERPRINT_OK) {
+      freeId = id;
+      break;
     }
   }
 
-  if (now - exitButtonDebugTime >= 1000) {
-    exitButtonDebugTime = now;
-    Serial.print("[EXIT] GPIO34 raw=");
-    Serial.print(raw == LOW ? "LOW" : "HIGH");
-    Serial.print(", stable=");
-    Serial.print(exitButtonStable == LOW ? "LOW" : "HIGH");
-    Serial.print(", armed=");
-    Serial.println(exitButtonArmed ? "YES" : "NO");
+  if (freeId < 0) {
+    showEnrollmentMessage("Sensor full", "No free ID");
+    Serial.println("[ENROLL][FINGER] Sensor database full.");
+    delay(1200);
+    return;
   }
+
+  Serial.print("[ENROLL][FINGER] Selected free ID: ");
+  Serial.println(freeId);
+
+  // Convert the first image already captured by checkFingerprint().
+  showEnrollmentMessage("Place finger", "First scan...");
+  uint8_t p = finger.image2Tz(1);
+
+  if (p != FINGERPRINT_OK) {
+    showEnrollmentMessage("Scan failed", "Try again");
+    Serial.print("[ENROLL][FINGER] First image2Tz error: ");
+    Serial.println(p);
+    delay(1000);
+    return;
+  }
+
+  // Reject a fingerprint that is already enrolled in the sensor.
+  p = finger.fingerSearch();
+
+  if (p == FINGERPRINT_OK) {
+    String msg = "Already ID: " + String(finger.fingerID);
+    showEnrollmentMessage("Finger exists", msg);
+    Serial.print("[ENROLL][FINGER] Already registered. ID: ");
+    Serial.println(finger.fingerID);
+    delay(1500);
+    return;
+  }
+
+  // Wait for the user to remove the finger before the second scan.
+  showEnrollmentMessage("Remove finger", "Please wait...");
+  unsigned long waitStart = millis();
+  bool fingerRemoved = false;
+
+  while (millis() - waitStart < 8000 && enrollmentMode) {
+    uint8_t imageStatus = finger.getImage();
+
+    if (imageStatus == FINGERPRINT_NOFINGER) {
+      fingerRemoved = true;
+      break;
+    }
+
+    delay(50);
+  }
+
+  if (!fingerRemoved || !enrollmentMode) {
+    showEnrollmentMessage("Remove timeout", "Try again");
+    Serial.println("[ENROLL][FINGER] Finger was not removed in time.");
+    delay(1000);
+    return;
+  }
+
+  // Capture the same finger for the second time.
+  showEnrollmentMessage("Place same finger", "Second scan...");
+  waitStart = millis();
+
+  do {
+    p = finger.getImage();
+
+    if (p == FINGERPRINT_OK) {
+      break;
+    }
+
+    delay(50);
+  } while (millis() - waitStart < 8000 && enrollmentMode);
+
+  if (p != FINGERPRINT_OK || !enrollmentMode) {
+    showEnrollmentMessage("Enroll timeout", "Try again");
+    Serial.println("[ENROLL][FINGER] Second scan timeout.");
+    delay(1000);
+    return;
+  }
+
+  p = finger.image2Tz(2);
+
+  if (p != FINGERPRINT_OK) {
+    showEnrollmentMessage("Second scan fail", "Try again");
+    Serial.print("[ENROLL][FINGER] Second image2Tz error: ");
+    Serial.println(p);
+    delay(1000);
+    return;
+  }
+
+  // Merge the two scans into one fingerprint model.
+  p = finger.createModel();
+
+  if (p != FINGERPRINT_OK) {
+    showEnrollmentMessage("Finger mismatch", "Try again");
+    Serial.print("[ENROLL][FINGER] createModel error: ");
+    Serial.println(p);
+    delay(1200);
+    return;
+  }
+
+  // Store the newly-created model in the free slot selected earlier.
+  p = finger.storeModel((uint16_t)freeId);
+
+  if (p == FINGERPRINT_OK) {
+    String idText = "ID: " + String(freeId);
+    showEnrollmentMessage("Finger saved", idText);
+
+    Serial.println("========== FINGERPRINT SAVED ==========");
+    Serial.print("FINGERPRINT_ID=");
+    Serial.println(freeId);
+    Serial.println("[ENROLL][FINGER] Model stored in AS608 flash.");
+    Serial.println("Enter this Fingerprint ID as a credential on Java Web.");
+  } else {
+    showEnrollmentMessage("Save failed", "AS608 error");
+    Serial.print("[ENROLL][FINGER] Store error: ");
+    Serial.println(p);
+  }
+
+  delay(1600);
 }
 
 void updateLockAndDoorState() {
@@ -469,12 +651,12 @@ void deniedAccess(const char* method) {
 
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Access Denied");
+  lcd.print("ACCESS DENIED");
   lcd.setCursor(0, 1);
   lcd.print(method);
 
   enteredPIN = "";
-  delay(1500);  // Keep ACCESS DENIED visible on the LCD
+  delay(1500);  // Keep DENIED visible briefly
   showReady();
 }
 
@@ -504,6 +686,19 @@ void checkRFID() {
   }
 
   uid.toUpperCase();
+
+  if (enrollmentMode) {
+    Serial.println("========== RFID CARD READ ==========");
+    Serial.print("RFID_UID=");
+    Serial.println(uid);
+    Serial.println("Copy this UID and add it as a CARD credential on Java Web.");
+    showEnrollmentMessage("RFID UID captured", uid);
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+    delay(1800);
+    showEnrollmentMessage("ENROLL MODE", "Scan card/finger");
+    return;
+  }
 
   Serial.print("[RFID] UID: ");
   Serial.println(uid);
@@ -537,6 +732,15 @@ void startFingerRemovalWait() {
 
 void checkFingerprint() {
   if (unlockSessionActive) return;
+  if (enrollmentMode) {
+    if (!fingerprintReady || waitingFingerRemoval) return;
+    uint8_t enrollImage = finger.getImage();
+    if (enrollImage == FINGERPRINT_OK) {
+      enrollFingerprint();
+      startFingerRemovalWait();
+    }
+    return;
+  }
   if (!fingerprintReady || waitingFingerRemoval) {
     return;
   }
@@ -583,7 +787,10 @@ void checkFingerprint() {
     }
   } else if (p == FINGERPRINT_NOTFOUND) {
     Serial.println("[FINGER] Not enrolled on sensor.");
-    deniedAccess("FINGERPRINT");
+
+    lcd.clear();
+    lcd.print("Finger Unknown");
+    showReady();
   } else {
     Serial.print("[FINGER] Search error: ");
     Serial.println(p);
@@ -607,6 +814,25 @@ void checkKeypad() {
 
   Serial.print("[KEYPAD] Key: ");
   Serial.println(key);
+
+  if (enrollmentMode) {
+    if (key == 'D') {
+      exitEnrollmentMode();
+    }
+    return;
+  }
+
+  // Hold GPIO34 and press A together to enter enrollment mode.
+  if (key == 'A' && exitButtonHeld && exitButtonStable == LOW) {
+    enrollmentComboUsed = true;
+    enterEnrollmentMode();
+    return;
+  }
+
+  // Ignore A/B/C/D outside enrollment mode.
+  if (key == 'A' || key == 'B' || key == 'C' || key == 'D') {
+    return;
+  }
 
   // Nhap chu so
   if (key >= '0' && key <= '9') {
@@ -683,7 +909,6 @@ void setup() {
   exitButtonStable = exitButtonRawLast;
   exitButtonArmed = (exitButtonRawLast == HIGH);
   exitButtonLastChange = millis();
-  exitButtonDebugTime = millis();
   Serial.println("[EXIT] Button on GPIO34 initialized (external pull-up; pressed=LOW).");
   Serial.print("[EXIT] Initial GPIO34 level: ");
   Serial.println(exitButtonRawLast == LOW ? "LOW" : "HIGH");
@@ -759,9 +984,13 @@ void loop() {
   updateLockAndDoorState();
   checkExitButton();
 
+  if (enrollmentMode && millis() - enrollmentStartedAt >= ENROLLMENT_TIMEOUT_MS) {
+    Serial.println("[ENROLL] 60-second timeout.");
+    exitEnrollmentMode();
+  }
+
   if (millis() - lastHeartbeat >= 2000) {
     lastHeartbeat = millis();
-    Serial.println("[DEBUG] LOOP ALIVE");
   }
 
   if (!unlockSessionActive) {
@@ -779,8 +1008,10 @@ void loop() {
 
     checkFingerprint();
 
-    // HTTP is synchronous: timeouts are shortened above, and polling is last.
-    checkRemoteUnlock();
+    // Do not run remote polling while the user is enrolling credentials.
+    if (!enrollmentMode) {
+      checkRemoteUnlock();
+    }
   }
 
   delay(1);
